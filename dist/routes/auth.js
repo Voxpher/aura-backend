@@ -125,23 +125,33 @@ router.post('/register', async (req, res) => {
             token,
             expiresAt: new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS),
         });
-        // Send verification email — non-fatal if email service not configured
-        try {
-            await (0, emailService_1.sendVerificationEmail)(email, displayName, token);
+        // Send verification email — only if RESEND_API_KEY is configured
+        let emailSent = false;
+        if (process.env.RESEND_API_KEY) {
+            try {
+                await (0, emailService_1.sendVerificationEmail)(email, displayName, token);
+                emailSent = true;
+            }
+            catch (emailErr) {
+                console.warn('[Auth] Could not send verification email:', emailErr);
+            }
         }
-        catch (emailErr) {
-            console.warn('[Auth] Could not send verification email:', emailErr);
+        else {
+            // No email service configured — auto-verify the account so users aren't blocked
+            await User_1.default.findByIdAndUpdate(user._id, { isEmailVerified: true });
+            await EmailVerification_1.default.deleteOne({ userId: user._id });
+            console.info('[Auth] RESEND_API_KEY not set — account auto-verified for:', email);
         }
         const jwt_token = signToken(String(user._id), user.username);
         res.status(201).json({
             token: jwt_token,
-            emailVerificationSent: true,
+            emailVerificationSent: emailSent,
             user: {
                 id: user._id,
                 username: user.username,
                 email: user.email,
                 displayName: user.displayName,
-                isEmailVerified: false,
+                isEmailVerified: !process.env.RESEND_API_KEY, // true when no email service
             },
         });
     }

@@ -1,24 +1,32 @@
-import { Resend } from 'resend';
+import { BrevoClient } from '@getbrevo/brevo';
 
-let resend: Resend | null = null;
+/**
+ * Email service using Brevo (formerly Sendinblue).
+ *
+ * No custom domain required — just verify your sender email address
+ * in the Brevo dashboard (Senders & IP → Senders).
+ *
+ * Setup:
+ *   1. Create free account at https://app.brevo.com
+ *   2. Go to SMTP & API → API Keys → Generate new key
+ *   3. Go to Senders & IP → Senders → Add your Gmail → click verify link
+ *   4. Set these env vars in Railway:
+ *        BREVO_API_KEY=your_api_key
+ *        EMAIL_FROM=yourname@gmail.com
+ *        EMAIL_FROM_NAME=Aura
+ *        APP_URL=https://your-railway-url.up.railway.app
+ */
 
-function getResend(): Resend {
-  if (!resend) {
-    const apiKey = process.env.RESEND_API_KEY;
-    if (!apiKey) {
-      throw new Error('RESEND_API_KEY is not set. Add it to your .env file.');
-    }
-    resend = new Resend(apiKey);
+function getClient(): BrevoClient {
+  const apiKey = process.env.BREVO_API_KEY;
+  if (!apiKey) {
+    throw new Error('BREVO_API_KEY is not set. Add it to your Railway environment variables.');
   }
-  return resend;
+  return new BrevoClient({ apiKey });
 }
 
 /**
  * Send an email verification link to a newly registered user.
- *
- * @param toEmail     - The user's email address
- * @param displayName - The user's display name (used in the email greeting)
- * @param token       - The verification token to embed in the link
  */
 export async function sendVerificationEmail(
   toEmail: string,
@@ -27,12 +35,16 @@ export async function sendVerificationEmail(
 ): Promise<void> {
   const appUrl = process.env.APP_URL ?? 'http://localhost:3000';
   const verifyUrl = `${appUrl}/auth/verify-email?token=${token}`;
+  const fromEmail = process.env.EMAIL_FROM ?? 'noreply@example.com';
+  const fromName = process.env.EMAIL_FROM_NAME ?? 'Aura';
 
-  await getResend().emails.send({
-    from: 'Aura <noreply@yourdomain.com>', // ← replace with your verified Resend domain
-    to: toEmail,
+  const client = getClient();
+
+  await client.transactionalEmails.sendTransacEmail({
     subject: 'Verify your Aura account',
-    html: `
+    sender: { name: fromName, email: fromEmail },
+    to: [{ email: toEmail, name: displayName }],
+    htmlContent: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
         <h2 style="color: #6C63FF;">Welcome to Aura, ${displayName}!</h2>
         <p>Click the button below to verify your email address and activate your account.</p>
@@ -55,7 +67,6 @@ export async function sendVerificationEmail(
 
 /**
  * Send a password reset email.
- * (Placeholder — implement when needed)
  */
 export async function sendPasswordResetEmail(
   toEmail: string,
@@ -64,12 +75,16 @@ export async function sendPasswordResetEmail(
 ): Promise<void> {
   const appUrl = process.env.APP_URL ?? 'http://localhost:3000';
   const resetUrl = `${appUrl}/auth/reset-password?token=${token}`;
+  const fromEmail = process.env.EMAIL_FROM ?? 'noreply@example.com';
+  const fromName = process.env.EMAIL_FROM_NAME ?? 'Aura';
 
-  await getResend().emails.send({
-    from: 'Aura <noreply@yourdomain.com>',
-    to: toEmail,
+  const client = getClient();
+
+  await client.transactionalEmails.sendTransacEmail({
     subject: 'Reset your Aura password',
-    html: `
+    sender: { name: fromName, email: fromEmail },
+    to: [{ email: toEmail, name: displayName }],
+    htmlContent: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
         <h2 style="color: #6C63FF;">Reset your password</h2>
         <p>Hi ${displayName}, click below to reset your Aura password.</p>
