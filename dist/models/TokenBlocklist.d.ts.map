@@ -1,0 +1,1 @@
+{"version":3,"file":"TokenBlocklist.d.ts","sourceRoot":"","sources":["../../src/models/TokenBlocklist.ts"],"names":[],"mappings":";;;;;;;;;;;;;;;;;;;;;;;;AAAA,OAAiB,EAAE,QAAQ,EAAU,KAAK,EAAE,MAAM,UAAU,CAAC;AAE7D;;;;;;GAMG;AACH,MAAM,WAAW,eAAgB,SAAQ,QAAQ;IAC/C,GAAG,EAAE,MAAM,CAAC;IACZ,SAAS,EAAE,IAAI,CAAC;CACjB;AAiBD,QAAA,MAAM,cAAc,EAAE,KAAK,CAAC,eAAe,CAG1C,CAAC;AAEF,eAAe,cAAc,CAAC"}

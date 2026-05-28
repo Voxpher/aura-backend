@@ -1,9 +1,6 @@
 # Dependencies
 node_modules/
 
-# Build output
-dist/
-
 # Environment variables — never commit real secrets
 .env
 
@@ -18,3 +15,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# dist/ is committed so Railway can run without a build step
+# Uncomment the line below if you want to exclude it:
+# dist/
