@@ -24,6 +24,7 @@ export interface IUser extends Document {
   failedLoginAttempts: number;
   deviceTokens: string[];
   notificationPrefs: INotificationPrefs;
+  isEmailVerified: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -93,6 +94,12 @@ const UserSchema = new Schema<IUser>(
     notificationPrefs: {
       type: Schema.Types.Mixed,
       default: {},
+    },
+    /** Whether the user has verified their email address */
+    isEmailVerified: {
+      type: Boolean,
+      required: true,
+      default: false,
     },
   },
   {

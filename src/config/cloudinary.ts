@@ -10,9 +10,10 @@ export function configureCloudinary(): void {
   const apiSecret = process.env.CLOUDINARY_API_SECRET;
 
   if (!cloudName || !apiKey || !apiSecret) {
-    throw new Error(
-      'Cloudinary environment variables are not fully set (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET)'
+    console.warn(
+      '[Cloudinary] Environment variables not fully set — avatar uploads will be unavailable until configured.'
     );
+    return;
   }
 
   cloudinary.config({

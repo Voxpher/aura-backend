@@ -5,8 +5,10 @@ import { z } from 'zod';
 
 import User from '../models/User';
 import TokenBlocklist from '../models/TokenBlocklist';
+import EmailVerification, { generateVerificationToken } from '../models/EmailVerification';
 import { authenticateToken } from '../middleware/auth';
 import { AuthRequest } from '../types';
+import { sendVerificationEmail } from '../services/emailService';
 
 const router = Router();
 
@@ -36,30 +38,16 @@ const LoginSchema = z.object({
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
-/** Maximum consecutive failed login attempts before lockout. Requirement 1.7 */
 const MAX_FAILED_ATTEMPTS = 5;
-
-/** Duration of account lockout in milliseconds (15 minutes). Requirement 1.7 */
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
-
-/** Window within which failed attempts are counted (15 minutes). Requirement 1.7 */
-const FAILURE_WINDOW_MS = 15 * 60 * 1000;
-
-/** JWT access token expiry (30 days). Requirement 1.3 */
 const TOKEN_EXPIRY = '30d';
+const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-/**
- * Signs a JWT for the given user.
- * Payload: { userId, username }
- * Expiry: 30 days (Requirement 1.3)
- */
 function signToken(userId: string, username: string): string {
   const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    throw new Error('JWT_SECRET environment variable is not set');
-  }
+  if (!secret) throw new Error('JWT_SECRET environment variable is not set');
   return jwt.sign({ userId, username }, secret, {
     expiresIn: TOKEN_EXPIRY,
     algorithm: 'HS256',
@@ -71,11 +59,11 @@ function signToken(userId: string, username: string): string {
 /**
  * Register a new user account.
  *
- * Validates username, email, password, and displayName.
- * Hashes password with bcrypt (cost factor 12).
- * Returns a signed JWT on success.
- *
- * Requirements: 1.1, 1.2, 1.6
+ * - Validates all fields
+ * - Hashes password with bcrypt (cost 12)
+ * - Creates user with isEmailVerified = false
+ * - Sends a verification email via Resend
+ * - Returns a JWT (user can use the app but email is unverified)
  */
 router.post('/register', async (req: Request, res: Response): Promise<void> => {
   const parsed = RegisterSchema.safeParse(req.body);
@@ -92,31 +80,22 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
   const { username, email, password, displayName } = parsed.data;
 
   try {
-    // Check for duplicate email (Requirement 1.2)
     const existingEmail = await User.findOne({ email }).lean();
     if (existingEmail) {
       res.status(409).json({
-        error: {
-          code: 'EMAIL_ALREADY_IN_USE',
-          message: 'An account with this email address already exists.',
-        },
+        error: { code: 'EMAIL_ALREADY_IN_USE', message: 'An account with this email address already exists.' },
       });
       return;
     }
 
-    // Check for duplicate username
     const existingUsername = await User.findOne({ username }).lean();
     if (existingUsername) {
       res.status(409).json({
-        error: {
-          code: 'USERNAME_ALREADY_IN_USE',
-          message: 'This username is already taken.',
-        },
+        error: { code: 'USERNAME_ALREADY_IN_USE', message: 'This username is already taken.' },
       });
       return;
     }
 
-    // Hash password with bcrypt cost factor 12 (Requirement 1.6)
     const passwordHash = await bcrypt.hash(password, 12);
 
     const user = await User.create({
@@ -125,26 +104,130 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
       passwordHash,
       displayName,
       failedLoginAttempts: 0,
+      isEmailVerified: false,
     });
 
-    const token = signToken(String(user._id), user.username);
+    // Create verification token (expires in 24 hours)
+    const token = generateVerificationToken();
+    await EmailVerification.create({
+      userId: user._id,
+      token,
+      expiresAt: new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS),
+    });
+
+    // Send verification email — non-fatal if email service not configured
+    try {
+      await sendVerificationEmail(email, displayName, token);
+    } catch (emailErr) {
+      console.warn('[Auth] Could not send verification email:', emailErr);
+    }
+
+    const jwt_token = signToken(String(user._id), user.username);
 
     res.status(201).json({
-      token,
+      token: jwt_token,
+      emailVerificationSent: true,
       user: {
         id: user._id,
         username: user.username,
         email: user.email,
         displayName: user.displayName,
+        isEmailVerified: false,
       },
     });
   } catch (err) {
     console.error('Registration error:', err);
     res.status(500).json({
-      error: {
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'An unexpected error occurred.',
-      },
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'An unexpected error occurred.' },
+    });
+  }
+});
+
+// ── GET /auth/verify-email?token=xxx ─────────────────────────────────────
+
+/**
+ * Verify a user's email address using the token from the verification email.
+ *
+ * - Finds the token in EmailVerification collection
+ * - Marks user.isEmailVerified = true
+ * - Deletes the used token
+ * - Returns a success message (Flutter app can redirect to login)
+ */
+router.get('/verify-email', async (req: Request, res: Response): Promise<void> => {
+  const { token } = req.query;
+
+  if (!token || typeof token !== 'string') {
+    res.status(400).json({
+      error: { code: 'MISSING_TOKEN', message: 'Verification token is required.' },
+    });
+    return;
+  }
+
+  try {
+    const record = await EmailVerification.findOne({ token });
+
+    if (!record) {
+      res.status(400).json({
+        error: { code: 'INVALID_TOKEN', message: 'This verification link is invalid or has expired.' },
+      });
+      return;
+    }
+
+    // Mark user as verified
+    await User.findByIdAndUpdate(record.userId, { isEmailVerified: true });
+
+    // Delete the used token
+    await EmailVerification.deleteOne({ _id: record._id });
+
+    // Return a simple success page (Flutter deep link can handle this)
+    res.status(200).json({
+      message: 'Email verified successfully. You can now log in.',
+    });
+  } catch (err) {
+    console.error('Email verification error:', err);
+    res.status(500).json({
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'An unexpected error occurred.' },
+    });
+  }
+});
+
+// ── POST /auth/resend-verification ───────────────────────────────────────
+
+/**
+ * Resend the verification email to the authenticated user.
+ * Useful if the original email expired or was lost.
+ */
+router.post('/resend-verification', authenticateToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      res.status(404).json({ error: { code: 'USER_NOT_FOUND', message: 'User not found.' } });
+      return;
+    }
+
+    if (user.isEmailVerified) {
+      res.status(400).json({ error: { code: 'ALREADY_VERIFIED', message: 'Email is already verified.' } });
+      return;
+    }
+
+    // Delete any existing token for this user
+    await EmailVerification.deleteMany({ userId: user._id });
+
+    // Create a new token
+    const token = generateVerificationToken();
+    await EmailVerification.create({
+      userId: user._id,
+      token,
+      expiresAt: new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS),
+    });
+
+    await sendVerificationEmail(user.email, user.displayName, token);
+
+    res.status(200).json({ message: 'Verification email sent.' });
+  } catch (err) {
+    console.error('Resend verification error:', err);
+    res.status(500).json({
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'An unexpected error occurred.' },
     });
   }
 });
@@ -153,57 +236,35 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
 
 /**
  * Authenticate a user and return a signed JWT.
- *
- * Rate limiting / account lockout (Requirement 1.7):
- *   - Before password check: if lockedUntil > now, return 429.
- *   - On failed login: increment failedLoginAttempts.
- *     If count reaches MAX_FAILED_ATTEMPTS within FAILURE_WINDOW_MS,
- *     set lockedUntil = now + LOCKOUT_DURATION_MS.
- *   - On successful login: reset failedLoginAttempts = 0, clear lockedUntil.
- *
- * Error indistinguishability (Requirement 1.4):
- *   - Wrong email and wrong password both return the same 401 response.
- *
- * Requirements: 1.3, 1.4, 1.7
+ * Includes account lockout after 5 failed attempts.
  */
 router.post('/login', async (req: Request, res: Response): Promise<void> => {
   const parsed = LoginSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({
-      error: {
-        code: 'VALIDATION_ERROR',
-        message: parsed.error.errors[0]?.message ?? 'Invalid input.',
-      },
+      error: { code: 'VALIDATION_ERROR', message: parsed.error.errors[0]?.message ?? 'Invalid input.' },
     });
     return;
   }
 
   const { email, password } = parsed.data;
 
-  // Generic invalid-credentials response — used for both wrong email and wrong
-  // password to prevent user enumeration (Requirement 1.4).
   const invalidCredentialsResponse = {
-    error: {
-      code: 'INVALID_CREDENTIALS',
-      message: 'Invalid email or password.',
-    },
+    error: { code: 'INVALID_CREDENTIALS', message: 'Invalid email or password.' },
   };
 
   try {
     const user = await User.findOne({ email });
 
-    // If user not found, return generic error (Requirement 1.4)
     if (!user) {
       res.status(401).json(invalidCredentialsResponse);
       return;
     }
 
-    // ── Account lockout check (Requirement 1.7) ───────────────────────────
+    // Account lockout check
     const now = new Date();
     if (user.lockedUntil && user.lockedUntil > now) {
-      const minutesRemaining = Math.ceil(
-        (user.lockedUntil.getTime() - now.getTime()) / 60_000
-      );
+      const minutesRemaining = Math.ceil((user.lockedUntil.getTime() - now.getTime()) / 60_000);
       res.status(429).json({
         error: {
           code: 'ACCOUNT_LOCKED',
@@ -213,39 +274,23 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    // ── Password verification ─────────────────────────────────────────────
     const passwordMatch = await bcrypt.compare(password, user.passwordHash);
 
     if (!passwordMatch) {
-      // Increment failed attempt counter (Requirement 1.7)
       const newFailedCount = user.failedLoginAttempts + 1;
-
-      const updateFields: {
-        failedLoginAttempts: number;
-        lockedUntil?: Date;
-      } = { failedLoginAttempts: newFailedCount };
-
-      // Lock account after MAX_FAILED_ATTEMPTS consecutive failures within
-      // the FAILURE_WINDOW_MS window (Requirement 1.7).
-      // We track the window by checking whether the account was already
-      // accumulating failures (lockedUntil is unset means we're in a fresh
-      // or ongoing window). The simplest correct approach: lock when the
-      // counter reaches the threshold.
+      const updateFields: { failedLoginAttempts: number; lockedUntil?: Date } = {
+        failedLoginAttempts: newFailedCount,
+      };
       if (newFailedCount >= MAX_FAILED_ATTEMPTS) {
         updateFields.lockedUntil = new Date(now.getTime() + LOCKOUT_DURATION_MS);
       }
-
       await User.updateOne({ _id: user._id }, { $set: updateFields });
-
       res.status(401).json(invalidCredentialsResponse);
       return;
     }
 
-    // ── Successful login — reset lockout state (Requirement 1.7) ─────────
-    await User.updateOne(
-      { _id: user._id },
-      { $set: { failedLoginAttempts: 0, lockedUntil: undefined } }
-    );
+    // Reset lockout on success
+    await User.updateOne({ _id: user._id }, { $set: { failedLoginAttempts: 0, lockedUntil: undefined } });
 
     const token = signToken(String(user._id), user.username);
 
@@ -256,72 +301,42 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
         username: user.username,
         email: user.email,
         displayName: user.displayName,
+        isEmailVerified: user.isEmailVerified,
       },
     });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({
-      error: {
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'An unexpected error occurred.',
-      },
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'An unexpected error occurred.' },
     });
   }
 });
 
 // ── POST /auth/logout ─────────────────────────────────────────────────────
 
-/**
- * Invalidate the current JWT by adding its jti to the server-side blocklist.
- *
- * The TokenBlocklist document is automatically removed by MongoDB's TTL
- * mechanism once the token's expiry time has passed (Requirement 1.8).
- *
- * Requirements: 1.8
- */
 router.post('/logout', authenticateToken, async (req: AuthRequest, res: Response): Promise<void> => {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.startsWith('Bearer ')
-    ? authHeader.slice(7)
-    : null;
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
 
   if (!token) {
-    res.status(401).json({
-      error: {
-        code: 'MISSING_TOKEN',
-        message: 'Authentication token is required.',
-      },
-    });
+    res.status(401).json({ error: { code: 'MISSING_TOKEN', message: 'Authentication token is required.' } });
     return;
   }
 
   try {
-    const secret = process.env.JWT_SECRET!;
     const payload = jwt.decode(token) as { jti?: string; exp?: number } | null;
-
-    // Use jti if present; fall back to a hash of the token itself
     const jti = payload?.jti ?? token;
     const expiresAt = payload?.exp
       ? new Date(payload.exp * 1000)
       : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    // Upsert to avoid duplicate-key errors on double-logout
-    await TokenBlocklist.updateOne(
-      { jti },
-      { $set: { jti, expiresAt } },
-      { upsert: true }
-    );
-
-    void secret; // suppress unused-variable warning
+    await TokenBlocklist.updateOne({ jti }, { $set: { jti, expiresAt } }, { upsert: true });
 
     res.status(200).json({ message: 'Logged out successfully.' });
   } catch (err) {
     console.error('Logout error:', err);
     res.status(500).json({
-      error: {
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'An unexpected error occurred.',
-      },
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'An unexpected error occurred.' },
     });
   }
 });

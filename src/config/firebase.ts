@@ -15,9 +15,10 @@ export function initFirebase(): void {
   const privateKey = process.env.FIREBASE_PRIVATE_KEY;
 
   if (!projectId || !clientEmail || !privateKey) {
-    throw new Error(
-      'Firebase environment variables are not fully set (FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY)'
+    console.warn(
+      '[Firebase] Environment variables not fully set — push notifications will be unavailable until configured.'
     );
+    return;
   }
 
   admin.initializeApp({
