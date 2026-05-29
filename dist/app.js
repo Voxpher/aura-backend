@@ -41,6 +41,21 @@ function createApp() {
     // Echo Thread endpoints: POST /messages/:id/replies, GET /messages/:id/thread
     app.use('/messages', messages_1.default);
     app.use('/users', users_1.default);
+    // Global error handler — keeps malformed requests from spamming stack traces.
+    app.use((err, _req, res, next) => {
+        if (res.headersSent)
+            return next(err);
+        // Malformed JSON body (body-parser sets type 'entity.parse.failed')
+        if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+            res.status(400).json({
+                error: { code: 'INVALID_JSON', message: 'Request body is not valid JSON.' },
+            });
+            return;
+        }
+        res.status(err.status ?? 500).json({
+            error: { code: 'INTERNAL_ERROR', message: err.message || 'Unexpected error.' },
+        });
+    });
     return app;
 }
 exports.createApp = createApp;
